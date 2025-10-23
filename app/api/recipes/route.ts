@@ -8,6 +8,7 @@ const Body = z.object({
   ingredients: z.array(z.object({ name: z.string() })),
   filters: Filters.default({}),
   excludeIds: z.array(z.string().uuid()).default([]),
+  excludeNames: z.array(z.string()).default([]), // NEW
   count: z.number().int().min(1).max(10).default(5)
 });
 
@@ -18,12 +19,15 @@ function uuid() {
 }
 
 export async function POST(req: NextRequest) {
-  const { ingredients, filters, excludeIds, count } = Body.parse(await req.json());
+  const { ingredients, filters, excludeIds, excludeNames, count } = Body.parse(await req.json());
   const detectedSet = new Set(ingredients.map(i => i.name.toLowerCase()));
 
   if (isMockMode()) {
+    // You can keep or ignore this branch now; it won’t run with MOCK_MODE=false.
     const baseNames = ["Quick Veggie Scramble","Cheesy Spinach Quesadilla","Pepper-Tomato Pasta","Tomato Spinach Salad","Sheet-Pan Veggie Bake","Stuffed Bell Peppers","Spinach Omelette","Tomato Rice Bowl"];
-    const recipes = baseNames.slice(0, count + 2).map((name, idx) => {
+    const taken = new Set((excludeNames || []).map(n => n.toLowerCase()));
+    const picked = baseNames.filter(n => !taken.has(n.toLowerCase())).slice(0, count);
+    const recipes = picked.map((name, idx) => {
       const ing = ["bell pepper","cherry tomato","spinach","eggs","cheddar cheese","olive oil","salt","pepper"].slice(0, 5 + (idx % 2));
       return {
         id: uuid(),
@@ -36,7 +40,7 @@ export async function POST(req: NextRequest) {
         health_score: 6 + (idx % 4),
         match_score: 5
       };
-    }).filter(r => !excludeIds.includes(r.id));
+    });
     const final = recipes.map(r => ({ ...r, match_score: computeMatchScore(detectedSet, r.ingredients) }));
     return NextResponse.json({ recipes: final.slice(0, count) });
   }
@@ -61,7 +65,9 @@ Create ${count} distinct recipes as an array of objects with fields:
 id (uuid v4), name, description (1–2 sentences), prep_time_minutes (int),
 ingredients (array of strings), steps (array of strings), tags (array of strings),
 health_score (1..10), match_score (int placeholder).
-Avoid duplicate IDs and near-identical names. Exclude IDs: ${excludeIds.join(", ") || "none"}.
+Avoid duplicate IDs and near-identical names.
+Avoid recipe names: ${excludeNames.length ? excludeNames.join(", ") : "none"}.
+Exclude IDs: ${excludeIds.join(", ") || "none"}.
 Constraints:
 ${constraints.join("\n")}
 Return ONLY JSON array of ${count} recipes.`;

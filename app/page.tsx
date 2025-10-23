@@ -58,6 +58,7 @@ export default function Home() {
         ingredients: ingredients.map(i => ({ name: i.name })),
         filters,
         excludeIds: Array.from(excludeIds),
+        excludeNames: recipes.map(r => r.name), // add this line
         count
       })
     });
