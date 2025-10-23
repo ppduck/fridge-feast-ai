@@ -8,7 +8,7 @@ const Body = z.object({
   ingredients: z.array(z.object({ name: z.string() })),
   filters: Filters.default({}),
   excludeIds: z.array(z.string().uuid()).default([]),
-  excludeNames: z.array(z.string()).default([]), // NEW
+  excludeNames: z.array(z.string()).default([]), // allow client to pass names already shown
   count: z.number().int().min(1).max(10).default(5)
 });
 
@@ -18,16 +18,41 @@ function uuid() {
     : "00000000-0000-4000-8000-000000000000";
 }
 
+// Helper: robust JSON parse with code-fence stripping fallback
+function safeJsonParseObject(s: string): any | null {
+  try { return JSON.parse(s); } catch {
+    // strip ```json ... ``` or ``` ... ```
+    const fence = s.match(/```(?:json)?\s*([\s\S]*?)```/i);
+    if (fence && fence[1]) {
+      try { return JSON.parse(fence[1]); } catch { /* ignore */ }
+    }
+    // try to extract outermost braces
+    const start = s.indexOf("{");
+    const end = s.lastIndexOf("}");
+    if (start !== -1 && end !== -1 && end > start) {
+      const sub = s.slice(start, end + 1);
+      try { return JSON.parse(sub); } catch { /* ignore */ }
+    }
+    return null;
+  }
+}
+
 export async function POST(req: NextRequest) {
   const { ingredients, filters, excludeIds, excludeNames, count } = Body.parse(await req.json());
   const detectedSet = new Set(ingredients.map(i => i.name.toLowerCase()));
 
+  // Mock mode fallback (won’t run with MOCK_MODE=false)
   if (isMockMode()) {
-    // You can keep or ignore this branch now; it won’t run with MOCK_MODE=false.
-    const baseNames = ["Quick Veggie Scramble","Cheesy Spinach Quesadilla","Pepper-Tomato Pasta","Tomato Spinach Salad","Sheet-Pan Veggie Bake","Stuffed Bell Peppers","Spinach Omelette","Tomato Rice Bowl"];
+    const baseNames = [
+      "Quick Veggie Scramble","Cheesy Spinach Quesadilla","Pepper-Tomato Pasta",
+      "Tomato Spinach Salad","Sheet-Pan Veggie Bake","Stuffed Bell Peppers",
+      "Spinach Omelette","Tomato Rice Bowl","Creamy Veggie Orzo","Garlic Butter Veg Rice",
+      "Spinach & Tomato Frittata","Veggie Fried Rice","One-Pan Pasta Primavera",
+      "Spinach Pesto Pasta","Caprese Toasts","Warm Tomato Couscous"
+    ];
     const taken = new Set((excludeNames || []).map(n => n.toLowerCase()));
-    const picked = baseNames.filter(n => !taken.has(n.toLowerCase())).slice(0, count);
-    const recipes = picked.map((name, idx) => {
+    const pool = baseNames.filter(n => !taken.has(n.toLowerCase())).slice(0, count);
+    const recipes = pool.map((name, idx) => {
       const ing = ["bell pepper","cherry tomato","spinach","eggs","cheddar cheese","olive oil","salt","pepper"].slice(0, 5 + (idx % 2));
       return {
         id: uuid(),
@@ -38,7 +63,6 @@ export async function POST(req: NextRequest) {
         steps: ["Prep ingredients","Cook/assemble","Season and serve"],
         tags: ["Quick","Vegetarian"],
         health_score: 6 + (idx % 4),
-        match_score: 5
       };
     });
     const final = recipes.map(r => ({ ...r, match_score: computeMatchScore(detectedSet, r.ingredients) }));
@@ -60,38 +84,51 @@ export async function POST(req: NextRequest) {
   if (filters.highProtein) constraints.push("Higher protein focus.");
   if (filters.lowCarb) constraints.push("Lower carbohydrate focus.");
 
-  const sys = `You are a concise creative chef who outputs strict JSON only.
-Create ${count} distinct recipes as an array of objects with fields:
-id (uuid v4), name, description (1–2 sentences), prep_time_minutes (int),
-ingredients (array of strings), steps (array of strings), tags (array of strings),
-health_score (1..10), match_score (int placeholder).
+  const sys = `You output strictly valid JSON objects only. No prose, no markdown.
+Return exactly one JSON object with a "recipes" array field. Each item must contain:
+- id (uuid v4)
+- name (string)
+- description (1–2 sentences)
+- prep_time_minutes (int)
+- ingredients (array of strings)
+- steps (array of strings)
+- tags (array of strings)
+- health_score (int 1..10)
+Do not include any other top-level fields. Ensure there are exactly ${count} items in the "recipes" array.
 Avoid duplicate IDs and near-identical names.
 Avoid recipe names: ${excludeNames.length ? excludeNames.join(", ") : "none"}.
-Exclude IDs: ${excludeIds.join(", ") || "none"}.
+Exclude IDs: ${excludeIds.length ? excludeIds.join(", ") : "none"}.
 Constraints:
-${constraints.join("\n")}
-Return ONLY JSON array of ${count} recipes.`;
+${constraints.join("\n")}`;
 
-  const usr = `Use these available ingredients where possible: ${names}.
+  const usr = `Available ingredients to prioritize: ${names}.
 Prefer variety across cuisines and proteins. Keep steps clear and realistic.`;
 
+  // Force JSON with response_format and use a slightly lower temperature for structural reliability
   const resp = await openai.chat.completions.create({
     model: "gpt-4o-mini",
-    temperature: 0.9,
+    temperature: 0.6,
+    response_format: { type: "json_object" },
     messages: [
       { role: "system", content: sys },
       { role: "user", content: usr }
     ]
   });
 
-  let content: unknown;
-  try { content = JSON.parse(resp.choices[0]?.message?.content || "[]"); }
-  catch { return NextResponse.json({ error: "Recipe JSON parse failed" }, { status: 502 }); }
+  const raw = resp.choices?.[0]?.message?.content || "";
+  const obj = safeJsonParseObject(raw);
+  if (!obj || !obj.recipes) {
+    return NextResponse.json({ error: "Recipe JSON parse failed" }, { status: 502 });
+  }
 
-  const base = z.array(Recipe.omit({ match_score: true, image_url: true })).safeParse(content);
-  if (!base.success) return NextResponse.json({ error: "Invalid recipe schema" }, { status: 502 });
+  // Validate and compute match_score
+  const BaseRecipe = Recipe.omit({ match_score: true, image_url: true });
+  const arrParsed = z.array(BaseRecipe).safeParse(obj.recipes);
+  if (!arrParsed.success) {
+    return NextResponse.json({ error: "Invalid recipe schema" }, { status: 502 });
+  }
 
-  const recipes = base.data.map(r => ({
+  const recipes = arrParsed.data.map(r => ({
     ...r,
     match_score: computeMatchScore(detectedSet, r.ingredients)
   }));
