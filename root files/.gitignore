@@ -1,1 +1,8 @@
-
+```gitignore
+# dependencies
+node_modules
+# next build output
+.next
+# local env files
+.env.local
+```
