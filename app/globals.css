@@ -1,1 +1,17 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
 
+:root {
+  color-scheme: light;
+}
+
+html:focus-within {
+  scroll-behavior: smooth;
+}
+
+* { box-sizing: border-box; }
+button:focus, input:focus, select:focus, summary:focus {
+  outline: 2px solid #2563eb; /* blue-600 focus */
+  outline-offset: 2px;
+}
