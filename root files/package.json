@@ -1,4 +1,4 @@
-```json
+json
 {
   "name": "fridge-feast-ai",
   "private": true,
@@ -22,4 +22,3 @@
     "typescript": "^5.4.5"
   }
 }
-```
